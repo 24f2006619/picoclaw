@@ -102,11 +102,7 @@ func main() {
 
 		workspace := cfg.WorkspacePath()
 		installer := skills.NewSkillInstaller(workspace)
-		// 获取全局配置目录和内置 skills 目录
-		globalDir := filepath.Dir(getConfigPath())
-		globalSkillsDir := filepath.Join(globalDir, "skills")
-		builtinSkillsDir := filepath.Join(globalDir, "picoclaw", "skills")
-		skillsLoader := skills.NewSkillsLoader(workspace, globalSkillsDir, builtinSkillsDir)
+		skillsLoader := skills.NewSkillsLoader(workspace, "")
 
 		switch subcommand {
 		case "list":
@@ -247,6 +243,70 @@ Information about user goes here.
 - Preferred interaction style
 - Areas of interest
 `,
+		"TOOLS.md": `# Available Tools
+
+This document describes the tools available to picoclaw.
+
+## File Operations
+
+### Read Files
+- Read file contents
+- Supports text, markdown, code files
+
+### Write Files
+- Create new files
+- Overwrite existing files
+- Supports various formats
+
+### List Directories
+- List directory contents
+- Recursive listing support
+
+### Edit Files
+- Make specific edits to files
+- Line-by-line editing
+- String replacement
+
+## Web Tools
+
+### Web Search
+- Search the internet using search API
+- Returns titles, URLs, snippets
+- Optional: Requires API key for best results
+
+### Web Fetch
+- Fetch specific URLs
+- Extract readable content
+- Supports HTML, JSON, plain text
+- Automatic content extraction
+
+## Command Execution
+
+### Shell Commands
+- Execute any shell command
+- Run in workspace directory
+- Full shell access with timeout protection
+
+## Messaging
+
+### Send Messages
+- Send messages to chat channels
+- Supports Telegram, WhatsApp, Feishu
+- Used for notifications and responses
+
+## AI Capabilities
+
+### Context Building
+- Load system instructions from files
+- Load skills dynamically
+- Build conversation history
+- Include timezone and other context
+
+### Memory Management
+- Long-term memory via MEMORY.md
+- Daily notes via dated files
+- Persistent across sessions
+`,
 		"IDENTITY.md": `# Identity
 
 ## Name
@@ -366,9 +426,6 @@ func agentCmd() {
 	args := os.Args[2:]
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
-		case "--debug", "-d":
-			logger.SetLevel(logger.DEBUG)
-			fmt.Println("🔍 Debug mode enabled")
 		case "-m", "--message":
 			if i+1 < len(args) {
 				message = args[i+1]
@@ -396,15 +453,6 @@ func agentCmd() {
 
 	msgBus := bus.NewMessageBus()
 	agentLoop := agent.NewAgentLoop(cfg, msgBus, provider)
-
-	// Print agent startup info (only for interactive mode)
-	startupInfo := agentLoop.GetStartupInfo()
-	logger.InfoCF("agent", "Agent initialized",
-		map[string]interface{}{
-			"tools_count":      startupInfo["tools"].(map[string]interface{})["count"],
-			"skills_total":     startupInfo["skills"].(map[string]interface{})["total"],
-			"skills_available": startupInfo["skills"].(map[string]interface{})["available"],
-		})
 
 	if message != "" {
 		ctx := context.Background()
@@ -507,16 +555,6 @@ func simpleInteractiveMode(agentLoop *agent.AgentLoop, sessionKey string) {
 }
 
 func gatewayCmd() {
-	// Check for --debug flag
-	args := os.Args[2:]
-	for _, arg := range args {
-		if arg == "--debug" || arg == "-d" {
-			logger.SetLevel(logger.DEBUG)
-			fmt.Println("🔍 Debug mode enabled")
-			break
-		}
-	}
-
 	cfg, err := loadConfig()
 	if err != nil {
 		fmt.Printf("Error loading config: %v\n", err)
@@ -531,24 +569,6 @@ func gatewayCmd() {
 
 	msgBus := bus.NewMessageBus()
 	agentLoop := agent.NewAgentLoop(cfg, msgBus, provider)
-
-	// Print agent startup info
-	fmt.Println("\n📦 Agent Status:")
-	startupInfo := agentLoop.GetStartupInfo()
-	toolsInfo := startupInfo["tools"].(map[string]interface{})
-	skillsInfo := startupInfo["skills"].(map[string]interface{})
-	fmt.Printf("  • Tools: %d loaded\n", toolsInfo["count"])
-	fmt.Printf("  • Skills: %d/%d available\n",
-		skillsInfo["available"],
-		skillsInfo["total"])
-
-	// Log to file as well
-	logger.InfoCF("agent", "Agent initialized",
-		map[string]interface{}{
-			"tools_count":      toolsInfo["count"],
-			"skills_total":     skillsInfo["total"],
-			"skills_available": skillsInfo["available"],
-		})
 
 	cronStorePath := filepath.Join(filepath.Dir(getConfigPath()), "cron", "jobs.json")
 	cronService := cron.NewCronService(cronStorePath, nil)
@@ -917,11 +937,7 @@ func skillsCmd() {
 
 	workspace := cfg.WorkspacePath()
 	installer := skills.NewSkillInstaller(workspace)
-	// 获取全局配置目录和内置 skills 目录
-	globalDir := filepath.Dir(getConfigPath())
-	globalSkillsDir := filepath.Join(globalDir, "skills")
-	builtinSkillsDir := filepath.Join(globalDir, "picoclaw", "skills")
-	skillsLoader := skills.NewSkillsLoader(workspace, globalSkillsDir, builtinSkillsDir)
+	skillsLoader := skills.NewSkillsLoader(workspace, "")
 
 	switch subcommand {
 	case "list":
@@ -967,7 +983,7 @@ func skillsHelp() {
 }
 
 func skillsListCmd(loader *skills.SkillsLoader) {
-	allSkills := loader.ListSkills()
+	allSkills := loader.ListSkills(false)
 
 	if len(allSkills) == 0 {
 		fmt.Println("No skills installed.")
@@ -977,9 +993,16 @@ func skillsListCmd(loader *skills.SkillsLoader) {
 	fmt.Println("\nInstalled Skills:")
 	fmt.Println("------------------")
 	for _, skill := range allSkills {
-		fmt.Printf("  ✓ %s (%s)\n", skill.Name, skill.Source)
+		status := "✓"
+		if !skill.Available {
+			status = "✗"
+		}
+		fmt.Printf("  %s %s (%s)\n", status, skill.Name, skill.Source)
 		if skill.Description != "" {
 			fmt.Printf("    %s\n", skill.Description)
+		}
+		if !skill.Available {
+			fmt.Printf("    Missing: %s\n", skill.Missing)
 		}
 	}
 }
@@ -1017,7 +1040,7 @@ func skillsRemoveCmd(installer *skills.SkillInstaller, skillName string) {
 }
 
 func skillsInstallBuiltinCmd(workspace string) {
-	builtinSkillsDir := "./picoclaw/skills"
+	builtinSkillsDir := getBuiltinSkillsDir()
 	workspaceSkillsDir := filepath.Join(workspace, "skills")
 
 	fmt.Printf("Copying builtin skills to workspace...\n")
@@ -1053,12 +1076,7 @@ func skillsInstallBuiltinCmd(workspace string) {
 }
 
 func skillsListBuiltinCmd() {
-	cfg, err := loadConfig()
-	if err != nil {
-		fmt.Printf("Error loading config: %v\n", err)
-		return
-	}
-	builtinSkillsDir := filepath.Join(filepath.Dir(cfg.WorkspacePath()), "picoclaw", "skills")
+	builtinSkillsDir := getBuiltinSkillsDir()
 
 	fmt.Println("\nAvailable Builtin Skills:")
 	fmt.Println("-----------------------")
@@ -1102,6 +1120,22 @@ func skillsListBuiltinCmd() {
 			}
 		}
 	}
+}
+
+func getBuiltinSkillsDir() string {
+	if _, err := os.Stat("skills"); err == nil {
+		return "skills"
+	}
+
+	exePath, err := os.Executable()
+	if err == nil {
+		exeSkills := filepath.Join(filepath.Dir(exePath), "skills")
+		if _, err := os.Stat(exeSkills); err == nil {
+			return exeSkills
+		}
+	}
+
+	return "skills"
 }
 
 func skillsSearchCmd(installer *skills.SkillInstaller) {
